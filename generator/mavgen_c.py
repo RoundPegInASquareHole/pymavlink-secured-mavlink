@@ -49,7 +49,7 @@ def generate_mavlink_h(directory, xml):
 #ifndef MAVLINK_H
 #define MAVLINK_H
 
-#define MAVLINK_PRIMARY_XML_HASH ${xml_hash}
+#define MAVLINK_PRIMARY_XML_IDX ${xml_idx}
 
 #ifndef MAVLINK_STX
 #define MAVLINK_STX ${protocol_marker}
@@ -94,7 +94,8 @@ def generate_main_h(directory, xml):
     #error Wrong include order: MAVLINK_${basename_upper}.H MUST NOT BE DIRECTLY USED. Include mavlink.h from the same directory instead or set ALL AND EVERY defines from MAVLINK.H manually accordingly, including the #define MAVLINK_H call.
 #endif
 
-#define MAVLINK_${basename_upper}_XML_HASH ${xml_hash}
+#undef MAVLINK_THIS_XML_IDX
+#define MAVLINK_THIS_XML_IDX ${xml_idx}
 
 #ifdef __cplusplus
 extern "C" {
@@ -147,8 +148,10 @@ ${{message:#include "./mavlink_msg_${name_lower}.h"
 ${{include_list:#include "../${base}/${base}.h"
 }}
 
+#undef MAVLINK_THIS_XML_IDX
+#define MAVLINK_THIS_XML_IDX ${xml_idx}
 
-#if MAVLINK_${basename_upper}_XML_HASH == MAVLINK_PRIMARY_XML_HASH
+#if MAVLINK_THIS_XML_IDX == MAVLINK_PRIMARY_XML_IDX
 # define MAVLINK_MESSAGE_INFO {${message_info_array}}
 # define MAVLINK_MESSAGE_NAMES {${message_name_array}}
 # if MAVLINK_COMMAND_24BIT
@@ -170,6 +173,12 @@ def generate_message_h(directory, m):
     f = open(os.path.join(directory, 'mavlink_msg_%s.h' % m.name_lower), mode='w')
     t.write(f, '''
 #pragma once
+
+#include <stdio.h>
+
+/// \\note Include encryption algorithms
+#include "../chacha20.h"
+
 // MESSAGE ${name} PACKING
 
 #define MAVLINK_MSG_ID_${name} ${id}
@@ -221,6 +230,26 @@ ${{arg_fields: * @param ${name} ${units} ${description}
 static inline uint16_t mavlink_msg_${name_lower}_pack(uint8_t system_id, uint8_t component_id, mavlink_message_t* msg,
                               ${{arg_fields: ${array_const}${type} ${array_prefix}${name},}})
 {
+    /// \\todo define the key and the nonce in the algorithm file and make them accessible for this file
+    // 256-bit key
+    uint8_t chacha20_key[] = {
+        0x00, 0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b,
+        0x0c, 0x0d, 0x0e, 0x0f,
+        0x10, 0x11, 0x12, 0x13,
+        0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1a, 0x1b,
+        0x1c, 0x1d, 0x1e, 0x1f
+    };
+
+    // 96-bit nonce
+    uint8_t nonce[] = {
+        0x00, 0x00, 0x00, 0x00, 
+        0x00, 0x00, 0x00, 0x4a, 
+        0x00, 0x00, 0x00, 0x00
+    };
+    
 #if MAVLINK_NEED_BYTE_SWAP || !MAVLINK_ALIGNED_FIELDS
     char buf[MAVLINK_MSG_ID_${name}_LEN];
 ${{scalar_fields:    _mav_put_${type}(buf, ${wire_offset}, ${putname});
@@ -234,49 +263,20 @@ ${{scalar_fields:    packet.${name} = ${putname};
 }}
 ${{array_fields:    mav_array_memcpy(packet.${name}, ${name}, sizeof(${type})*${array_length});
 }}
-        memcpy(_MAV_PAYLOAD_NON_CONST(msg), &packet, MAVLINK_MSG_ID_${name}_LEN);
+            
+    const char* packet_char = (const char*) &packet;
+    
+    uint8_t encrypt[MAVLINK_MSG_ID_${name}_LEN];
+    ChaCha20XOR(chacha20_key, 1, nonce, (uint8_t *)packet_char, (uint8_t *)encrypt, MAVLINK_MSG_ID_${name}_LEN);
+    const char* encrypt_char = (const char*) &encrypt;
+    
+    mavlink_${name_lower}_t* ${name_lower}_final = (mavlink_${name_lower}_t*)encrypt_char;
+    memcpy(_MAV_PAYLOAD_NON_CONST(msg), ${name_lower}_final, MAVLINK_MSG_ID_${name}_LEN);
+    
 #endif
 
     msg->msgid = MAVLINK_MSG_ID_${name};
     return mavlink_finalize_message(msg, system_id, component_id, MAVLINK_MSG_ID_${name}_MIN_LEN, MAVLINK_MSG_ID_${name}_LEN, MAVLINK_MSG_ID_${name}_CRC);
-}
-
-/**
- * @brief Pack a ${name_lower} message
- * @param system_id ID of this system
- * @param component_id ID of this component (e.g. 200 for IMU)
- * @param status MAVLink status structure
- * @param msg The MAVLink message to compress the data into
- *
-${{arg_fields: * @param ${name} ${units} ${description}
-}}
- * @return length of the message in bytes (excluding serial stream start sign)
- */
-static inline uint16_t mavlink_msg_${name_lower}_pack_status(uint8_t system_id, uint8_t component_id, mavlink_status_t *_status, mavlink_message_t* msg,
-                              ${{arg_fields: ${array_const}${type} ${array_prefix}${name},}})
-{
-#if MAVLINK_NEED_BYTE_SWAP || !MAVLINK_ALIGNED_FIELDS
-    char buf[MAVLINK_MSG_ID_${name}_LEN];
-${{scalar_fields:    _mav_put_${type}(buf, ${wire_offset}, ${putname});
-}}
-${{array_fields:    _mav_put_${type}_array(buf, ${wire_offset}, ${name}, ${array_length});
-}}
-        memcpy(_MAV_PAYLOAD_NON_CONST(msg), buf, MAVLINK_MSG_ID_${name}_LEN);
-#else
-    mavlink_${name_lower}_t packet;
-${{scalar_fields:    packet.${name} = ${putname};
-}}
-${{array_fields:    mav_array_memcpy(packet.${name}, ${name}, sizeof(${type})*${array_length});
-}}
-        memcpy(_MAV_PAYLOAD_NON_CONST(msg), &packet, MAVLINK_MSG_ID_${name}_LEN);
-#endif
-
-    msg->msgid = MAVLINK_MSG_ID_${name};
-#if MAVLINK_CRC_EXTRA
-    return mavlink_finalize_message_buffer(msg, system_id, component_id, _status, MAVLINK_MSG_ID_${name}_MIN_LEN, MAVLINK_MSG_ID_${name}_LEN, MAVLINK_MSG_ID_${name}_CRC);
-#else
-    return mavlink_finalize_message_buffer(msg, system_id, component_id, _status, MAVLINK_MSG_ID_${name}_MIN_LEN, MAVLINK_MSG_ID_${name}_LEN);
-#endif
 }
 
 /**
@@ -293,6 +293,27 @@ static inline uint16_t mavlink_msg_${name_lower}_pack_chan(uint8_t system_id, ui
                                mavlink_message_t* msg,
                                    ${{arg_fields:${array_const}${type} ${array_prefix}${name},}})
 {
+
+    /// \\todo define the key and the nonce in the algorithm file and make them accessible for this file
+    // 256-bit key
+    uint8_t chacha20_key[] = {
+        0x00, 0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b,
+        0x0c, 0x0d, 0x0e, 0x0f,
+        0x10, 0x11, 0x12, 0x13,
+        0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1a, 0x1b,
+        0x1c, 0x1d, 0x1e, 0x1f
+    };
+
+    // 96-bit nonce
+    uint8_t nonce[] = {
+        0x00, 0x00, 0x00, 0x00, 
+        0x00, 0x00, 0x00, 0x4a, 
+        0x00, 0x00, 0x00, 0x00
+    };
+        
 #if MAVLINK_NEED_BYTE_SWAP || !MAVLINK_ALIGNED_FIELDS
     char buf[MAVLINK_MSG_ID_${name}_LEN];
 ${{scalar_fields:    _mav_put_${type}(buf, ${wire_offset}, ${putname});
@@ -306,7 +327,16 @@ ${{scalar_fields:    packet.${name} = ${putname};
 }}
 ${{array_fields:    mav_array_memcpy(packet.${name}, ${name}, sizeof(${type})*${array_length});
 }}
-        memcpy(_MAV_PAYLOAD_NON_CONST(msg), &packet, MAVLINK_MSG_ID_${name}_LEN);
+        
+    const char* packet_char = (const char*) &packet;
+    
+    uint8_t encrypt[MAVLINK_MSG_ID_${name}_LEN];
+    ChaCha20XOR(chacha20_key, 1, nonce, (uint8_t *)packet_char, (uint8_t *)encrypt, MAVLINK_MSG_ID_${name}_LEN);
+    const char* encrypt_char = (const char*) &encrypt;
+    
+    mavlink_${name_lower}_t* ${name_lower}_final = (mavlink_${name_lower}_t*)encrypt_char;
+    memcpy(_MAV_PAYLOAD_NON_CONST(msg), ${name_lower}_final, MAVLINK_MSG_ID_${name}_LEN);
+    
 #endif
 
     msg->msgid = MAVLINK_MSG_ID_${name};
@@ -338,20 +368,6 @@ static inline uint16_t mavlink_msg_${name_lower}_encode(uint8_t system_id, uint8
 static inline uint16_t mavlink_msg_${name_lower}_encode_chan(uint8_t system_id, uint8_t component_id, uint8_t chan, mavlink_message_t* msg, const mavlink_${name_lower}_t* ${name_lower})
 {
     return mavlink_msg_${name_lower}_pack_chan(system_id, component_id, chan, msg,${{arg_fields: ${name_lower}->${name},}});
-}
-
-/**
- * @brief Encode a ${name_lower} struct with provided status structure
- *
- * @param system_id ID of this system
- * @param component_id ID of this component (e.g. 200 for IMU)
- * @param status MAVLink status structure
- * @param msg The MAVLink message to compress the data into
- * @param ${name_lower} C-struct to read the message contents from
- */
-static inline uint16_t mavlink_msg_${name_lower}_encode_status(uint8_t system_id, uint8_t component_id, mavlink_status_t* _status, mavlink_message_t* msg, const mavlink_${name_lower}_t* ${name_lower})
-{
-    return mavlink_msg_${name_lower}_pack_status(system_id, component_id, _status, msg, ${{arg_fields: ${name_lower}->${name},}});
 }
 
 /**
@@ -398,7 +414,7 @@ static inline void mavlink_msg_${name_lower}_send_struct(mavlink_channel_t chan,
 
 #if MAVLINK_MSG_ID_${name}_LEN <= MAVLINK_MAX_PAYLOAD_LEN
 /*
-  This variant of _send() can be used to save stack space by re-using
+  This varient of _send() can be used to save stack space by re-using
   memory from the receive buffer.  The caller provides a
   mavlink_message_t which is the size of a full mavlink message. This
   is usually the receive buffer for the channel, and allows a reply to an
@@ -448,13 +464,47 @@ static inline ${return_type} mavlink_msg_${name_lower}_get_${name}(const mavlink
  */
 static inline void mavlink_msg_${name_lower}_decode(const mavlink_message_t* msg, mavlink_${name_lower}_t* ${name_lower})
 {
+    /// \\todo define the key and the nonce in the algorithm file and make them accessible for this file
+    // 256-bit key
+    //uint8_t chacha20_key[] = {
+     //   0x00, 0x01, 0x02, 0x03,
+     //   0x04, 0x05, 0x06, 0x07,
+     //   0x08, 0x09, 0x0a, 0x0b,
+     //   0x0c, 0x0d, 0x0e, 0x0f,
+      //  0x10, 0x11, 0x12, 0x13,
+      //  0x14, 0x15, 0x16, 0x17,
+      //  0x18, 0x19, 0x1a, 0x1b,
+     //   0x1c, 0x1d, 0x1e, 0x1f
+    //};
+
+    // 96-bit nonce
+   // uint8_t nonce[] = {
+    //    0x00, 0x00, 0x00, 0x00, 
+   //     0x00, 0x00, 0x00, 0x4a, 
+   //     0x00, 0x00, 0x00, 0x00
+   // };
+
 #if MAVLINK_NEED_BYTE_SWAP || !MAVLINK_ALIGNED_FIELDS
 ${{ordered_fields:    ${decode_left}mavlink_msg_${name_lower}_get_${name}(msg${decode_right});
 }}
 #else
-        uint8_t len = msg->len < MAVLINK_MSG_ID_${name}_LEN? msg->len : MAVLINK_MSG_ID_${name}_LEN;
-        memset(${name_lower}, 0, MAVLINK_MSG_ID_${name}_LEN);
-    memcpy(${name_lower}, _MAV_PAYLOAD(msg), len);
+    uint8_t len = msg->len < MAVLINK_MSG_ID_${name}_LEN? msg->len : MAVLINK_MSG_ID_${name}_LEN;
+    memset(${name_lower}, 0, MAVLINK_MSG_ID_${name}_LEN);
+    memcpy(${name_lower}, _MAV_PAYLOAD(msg), len); // this is the original way to decode the incomming payload
+
+    //const char* payload = _MAV_PAYLOAD(msg);
+            
+    // printf("Encrypted data received from AP:\\n");
+    // hex_print((uint8_t *)payload, 0,len);
+            
+    //uint8_t decrypt[len];
+    //ChaCha20XOR(chacha20_key, 1, nonce, (uint8_t *)payload, (uint8_t *)decrypt, len);
+            
+    //const char* decrypt_char = (const char*) &decrypt;
+    //memcpy(${name_lower}, decrypt_char, len);
+
+    // printf("Decrypted data received from AP:\\n"); 
+	// hex_print((uint8_t *)decrypt_char, 0,len);            
 #endif
 }
 ''', m)
@@ -467,7 +517,7 @@ def generate_testsuite_h(directory, xml):
     t.write(f, '''
 /** @file
  *    @brief MAVLink comm protocol testsuite generated from ${basename}.xml
- *    @see https://mavlink.io/en/
+ *    @see http://qgroundcontrol.org/mavlink/
  */
 #pragma once
 #ifndef ${basename_upper}_TESTSUITE_H
@@ -548,11 +598,6 @@ static void mavlink_test_${name_lower}(uint8_t system_id, uint8_t component_id, 
     mavlink_msg_${name_lower}_send(MAVLINK_COMM_1 ${{arg_fields:, packet1.${name} }});
     mavlink_msg_${name_lower}_decode(last_msg, &packet2);
         MAVLINK_ASSERT(memcmp(&packet1, &packet2, sizeof(packet1)) == 0);
-
-#ifdef MAVLINK_HAVE_GET_MESSAGE_INFO
-    MAVLINK_ASSERT(mavlink_get_message_info_by_name("${name}") != NULL);
-    MAVLINK_ASSERT(mavlink_get_message_info_by_id(MAVLINK_MSG_ID_${name}) != NULL);
-#endif
 }
 }}
 
@@ -577,7 +622,7 @@ def copy_fixed_headers(directory, xml):
         "0.9": [ 'protocol.h', 'mavlink_helpers.h', 'mavlink_types.h', 'checksum.h' ],
         "1.0": [ 'protocol.h', 'mavlink_helpers.h', 'mavlink_types.h', 'checksum.h', 'mavlink_conversions.h' ],
         "2.0": [ 'protocol.h', 'mavlink_helpers.h', 'mavlink_types.h', 'checksum.h', 'mavlink_conversions.h',
-                 'mavlink_get_info.h', 'mavlink_sha256.h' ]
+                 'mavlink_get_info.h', 'mavlink_sha256.h', 'chacha20.h'] # added chacha20
         }
     basepath = os.path.dirname(os.path.realpath(__file__))
     srcpath = os.path.join(basepath, 'C/include_v%s' % xml.wire_protocol_version)
@@ -765,6 +810,6 @@ def generate(basename, xml_list):
 
     for idx in range(len(xml_list)):
         xml = xml_list[idx]
-        xml.xml_hash = hash(xml.basename)        
+        xml.xml_idx = idx
         generate_one(basename, xml)
     copy_fixed_headers(basename, xml_list[0])
